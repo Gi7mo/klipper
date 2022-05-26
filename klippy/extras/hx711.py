@@ -18,6 +18,7 @@ class MCU_hx711:
         self._last_time = 0
         self._callback = None
         self._oid = self.mcu.create_oid()
+        logging.info("created oid: (%c) (%d)", self._oid, self._oid)
         self.mcu.register_config_callback(self._build_config)
         try:
             query_adc = main.printer.lookup_object('query_adc')
@@ -26,14 +27,18 @@ class MCU_hx711:
         query_adc.register_adc(main.name, self)
     def _build_config(self):
         self.mcu._serial.register_response(self._handle_adc_state,
-            "hx711_in_state", self._oid)
-        self.mcu.add_config_cmd("config_hx711 oid=%d dout_pin=%s sck_pin=%s "
-            " gain=%d sample_interval=%d comm_delay=%d sps=%d" % (self._oid,
-            self._main.dout_pin, self._main.sck_pin, self._main.gain,
-            self._main.sample_interval, self._main.comm_delay, self._main.sps) )
-        self.mcu.add_config_cmd("query_hx711 oid=%d clock=0 sample_ticks=0 "
-            " sample_count=0 rest_ticks=0 min_value=0 max_value=0 "
-            " range_check_count=0" % ( self._oid) )
+            "hx711_value", self._oid)
+        self.mcu.add_config_cmd("config_hx711 oid=%d sclk_pin=%s dout_pin=%s"
+            % (self._oid, self._main.sck_pin, self._main.dout_pin) )
+        clock = self.mcu.get_query_slot(self._oid)
+        rest_ticks = self.mcu.seconds_to_clock(0.001)
+        logging.info("testing hx711")
+        logging.info("hx711 %d, %u %u" % (self._oid, clock, rest_ticks))
+        self.mcu.add_config_cmd("query_hx711_value oid=%d clock=%u rest_ticks=%u"
+            % (self._oid, clock, rest_ticks))
+        #self.mcu.add_config_cmd("query_hx711 oid=%d clock=0 sample_ticks=0 "
+        #    " sample_count=0 rest_ticks=0 min_value=0 max_value=0 "
+        #    " range_check_count=0" % ( self._oid) )
     def setup_adc_callback(self, report_time, callback):
         if self._callback is not None:
             logging.exception("Hx711: ADC callback already configured")
@@ -58,8 +63,6 @@ class MCU_hx711:
                 self._last_value)
         logging.info("hx711 %s value is %d \t%s" % ( self._main.name, self._last_value,
             bin(self._last_value) ) )
-
-
 
 class PrinterHx711:
 
