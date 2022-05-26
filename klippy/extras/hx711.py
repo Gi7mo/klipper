@@ -1,87 +1,86 @@
-# Support for hx711 load cell sensor
+# Support for HX711 ADC chip
 #
-# Copyright (C) 2022  Jochen Loeser <jochen_loeser@trimble.com>
+# Copyright (C) 2021  Konstantin Vogel <konstantin.vogel@gmx.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 
-class SensorHx711(object):
-    def __init__(self, config):
+import logging
+
+
+class MCU_hx711:
+
+    def __init__(self, main, config):
+        self._main = main
+        self.reactor = main.printer.get_reactor()
+        self.mcu = main.mcu
+        self.report_time = 0
+        self._last_value = 0.
+        self._last_time = 0
+        self._callback = None
+        self._oid = self.mcu.create_oid()
+        self.mcu.register_config_callback(self._build_config)
         try:
-            import numpy as np
+            query_adc = main.printer.lookup_object('query_adc')
         except:
-            raise config.error("HX711 requires numpy module")
-        self.printer = config.get_printer()
-        self._name = config.get_name().split()[-1]
-        self._last_value = None
-        # Create polynom
-        try:
-            data_str = config.get('calib_data', '0,0;1,1')
-            data = np.array(np.mat(data_str))
-            fit = np.polyfit(data[:,0], data[:,1], 1)
-            self._line = np.poly1d(fit)
-        except:
-            raise config.error("HX711: There is an error with your calib_data.")
-        # Setup pins
-        ppins = self.printer.lookup_object('pins')
-        self._sclk_pinparam = ppins.lookup_pin(config.get('sclk_pin'))
-        self._dout_pinparam = ppins.lookup_pin(config.get('dout_pin'))
-        self._mcu = None
-        for pin in [self._sclk_pinparam, self._dout_pinparam]:
-            if self._mcu is not None and pin['chip'] != self._mcu:
-                raise ppins.error("button pins must be on same mcu")
-            self._mcu = pin['chip']
-        # Create an OID
-        self._oid = self._mcu.create_oid()
-        # Register commands
-        self._query_hx711_value_cmd = None
-        self._mcu.register_config_callback(self._build_config)
-        self._mcu.register_response(self._handle_hx711_value,
-            "hx711_value", oid=self._oid)
-        # Register event handler
-        self.printer.register_event_handler("klippy:ready", self._handle_ready)
-        # Register GCODE command
-        gcode = self.printer.lookup_object('gcode')
-        gcode.register_mux_command("QUERY_HX711", "NAME", self._name,
-                                   self.cmd_QUERY_HX711,
-                                   desc=self.cmd_QUERY_HX711_help)
-    def _handle_ready(self):
-        self._start_measurement()
+            query_adc = main.printer.load_object(config, 'query_adc')
+        query_adc.register_adc(main.name, self)
     def _build_config(self):
-        self._mcu.add_config_cmd("config_hx711 oid=%d sclk_pin=%s dout_pin=%s"
-            % (self._oid, self._sclk_pinparam['pin'],
-                self._dout_pinparam['pin']))
-        self._query_hx711_value_cmd = self._mcu.lookup_command(
-            "query_hx711_value oid=%c clock=%u rest_ticks=%u")
-    def _handle_hx711_value(self, params):
+        self.mcu._serial.register_response(self._handle_adc_state,
+            "hx711_in_state", self._oid)
+        self.mcu.add_config_cmd("config_hx711 oid=%d dout_pin=%s sck_pin=%s "
+            " gain=%d sample_interval=%d comm_delay=%d sps=%d" % (self._oid,
+            self._main.dout_pin, self._main.sck_pin, self._main.gain,
+            self._main.sample_interval, self._main.comm_delay, self._main.sps) )
+        self.mcu.add_config_cmd("query_hx711 oid=%d clock=0 sample_ticks=0 "
+            " sample_count=0 rest_ticks=0 min_value=0 max_value=0 "
+            " range_check_count=0" % ( self._oid) )
+    def setup_adc_callback(self, report_time, callback):
+        if self._callback is not None:
+            logging.exception("Hx711: ADC callback already configured")
+        if report_time is not None:
+            self.report_time = report_time
+        self._callback = callback
+    def setup_minmax(self, sample_time, sample_count, minval, maxval,
+        range_check_count):
+        pass
+    def get_last_value(self):
+        return self._last_value, self._last_time
+    def read_single_value(self):
+        # wait until conversion is ready and the timer callback has been called
+        self._last_time = self.reactor.pause(self._last_time +
+            self.report_time + 0.0001)
+        return self._last_value
+    def _handle_adc_state(self, params):
         self._last_value = params['value']
-        self._start_measurement()
-    def _start_measurement(self):
-        clock = self._mcu.get_query_slot(self._oid)
-        rest_ticks = self._mcu.seconds_to_clock(0.001)
-        if self._query_hx711_value_cmd is not None:
-            self._query_hx711_value_cmd.send([self._oid, clock, rest_ticks],
-                reqclock=clock)
-    def get_status(self, eventtime):
-        if self._last_value is None:
-            return {
-                'raw_value': None,
-                'value':     None,
-            }
-        raw_value = self._last_value
-        value = self._line(raw_value)
-        return {
-            'raw_value': str(raw_value),
-            'value':     str(value),
-        }
-    cmd_QUERY_HX711_help = "Query hx711 for the current values"
-    def cmd_QUERY_HX711(self, gcmd):
-        if self._last_value is None:
-            gcmd.respond_info("hx711 value(raw_value): no value queried")
-            return
-        raw_value = self._last_value
-        value = self._line(raw_value)
-        gcmd.respond_info("hx711 value(raw_value): %.6f(%u)"
-            % (value, raw_value))
+        self._last_time = params['#sent_time']
+        if self._callback:
+            self._callback(self.mcu.estimated_print_time(self._last_time),
+                self._last_value)
+        logging.info("hx711 %s value is %d \t%s" % ( self._main.name, self._last_value,
+            bin(self._last_value) ) )
+
+
+
+class PrinterHx711:
+
+    def __init__(self, config):
+        self.printer = config.get_printer()
+        self.name = config.get_name().split()[1]
+        ppins = self.printer.lookup_object('pins')
+        dout_pin_params = ppins.lookup_pin(config.get('dout_pin'))
+        sck_pin_params = ppins.lookup_pin(config.get('sck_pin'))
+        self.dout_pin = dout_pin_params['pin']
+        self.sck_pin = sck_pin_params['pin']
+        self.mcu = dout_pin_params['chip']
+        self.gain = config.getchoice('gain', {32: 2, 64: 3, 128: 1}, default=64)
+        self.sps = config.getchoice('board_freq',{10: 10, 80: 80}, default=10)
+        self.sample_interval = config.getfloat('sample_interval', default=1)
+        self.comm_delay = config.getint('comm_delay', default=1)
+        self.config = config
+        ppins.register_chip(self.name, self)
+
+    def setup_pin(self, pin_type, pin_params):
+        return MCU_hx711(self, self.config)
 
 def load_config_prefix(config):
-    return SensorHx711(config)
+    return PrinterHx711(config)
